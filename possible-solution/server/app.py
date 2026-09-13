@@ -1,7 +1,10 @@
 # Create a base Flask server
 
+import csv
 import pickle
-from flask import Flask, request, jsonify
+from functools import lru_cache
+
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
@@ -16,8 +19,21 @@ def after_request(response):
     return response
 
 
-# Load model from pickle file
-model = pickle.load(open('model.pkl', 'rb'))
+# Load model from pickle file once at startup instead of once per request.
+with open('model.pkl', 'rb') as model_file:
+    model = pickle.load(model_file)
+
+
+@lru_cache(maxsize=1)
+def get_airports():
+    """Load and sort airport metadata once so repeated requests avoid re-reading the CSV."""
+    with open('airports.csv', newline='', encoding='utf-8') as airport_file:
+        airports = [
+            {'id': int(row['OriginAirportID']), 'name': row['OriginAirportName']}
+            for row in csv.DictReader(airport_file)
+        ]
+    return sorted(airports, key=lambda airport: airport['name'])
+
 
 # Model takes two parameters - day of week and airport id, then returns a prediction of flight delay
 @app.route('/predict', methods=['GET'])
@@ -25,11 +41,14 @@ def predict():
     """
     Takes two parameters - day of week and airport id, then returns a prediction of flight delay
     """
-    # Store day_of_week as int
-    day_of_week = int(request.args.get('day_of_week'))
-    airport_id = int(request.args.get('airport_id'))
+    day_of_week = request.args.get('day_of_week', type=int)
+    airport_id = request.args.get('airport_id', type=int)
+
+    if day_of_week is None or airport_id is None:
+        return jsonify({'error': 'day_of_week and airport_id are required'}), 400
+
     prediction = model.predict_proba([[day_of_week, airport_id]])[0]
-    
+
     # Split prediction string by space
     prediction = str(prediction).split(' ')
 
@@ -42,24 +61,12 @@ def predict():
     # return prediction as json
     return jsonify({'certainty': certainty, 'delay': delay})
 
+
 # Create a new route called airports with method of get
 @app.route('/airports', methods=['GET'])
 def airports():
-    # Load airports from csv file
-    airports = open('airports.csv', 'r').readlines()
+    return jsonify(get_airports())
 
-    # Remove first line of airports
-    airports.pop(0)
-
-    # Create list with dictionary of airports
-    # First value is id, second is name
-    # Convert id to integer
-    # Remove last character from name
-    airports = [{'id': int(airport.split(',')[0]), 'name': airport.split(',')[1][:-1]} for airport in airports]
-    # Sort by name
-    airports = sorted(airports, key=lambda k: k['name'])
-
-    return jsonify(airports)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, threaded=True)
